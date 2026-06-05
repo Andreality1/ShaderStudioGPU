@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shader Studio | Hybrid WebGL</title>
+    <style>
+        body {
+            background-color: #050505;
+            color: #c9d1d9;
+            font-family: 'Cascadia Code', 'Consolas', monospace;
+            margin: 0;
+            display: flex;
+            flex-direction: row; 
+            height: 100vh;
+            width: 100vw;
+            overflow: hidden;
+        }
+
+        #canvas-container {
+            flex: 1.2; 
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: #000;
+            border-right: 2px solid #30363d;
+        }
+
+        canvas {
+            width: 90%;
+            height: auto;
+            border: 1px solid #30363d;
+            box-shadow: 0 0 20px rgba(0, 255, 65, 0.1);
+            background-color: #000;
+        }
+
+        .canvas-controls { margin-top: 15px; }
+
+        #editor-wrapper {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background: #0d1117;
+            border-right: 2px solid #30363d;
+        }
+
+        .section-header {
+            background: #161b22;
+            padding: 10px;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: #8b949e;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #30363d;
+        }
+
+        .editor-container {
+            display: flex;
+            flex-grow: 1;
+            overflow: hidden;
+            position: relative;
+        }
+
+        #line-numbers {
+            width: 45px;
+            background: #0d1117;
+            color: #484f58;
+            padding: 15px 5px;
+            text-align: right;
+            font-size: 0.9rem;
+            line-height: 1.5;
+            user-select: none;
+            border-right: 1px solid #30363d;
+            overflow: hidden;
+        }
+
+        textarea {
+            flex-grow: 1;
+            background: transparent;
+            color: #d2a8ff;
+            border: none;
+            padding: 15px;
+            font-family: 'Cascadia Code', monospace;
+            font-size: 0.9rem;
+            resize: none;
+            outline: none;
+            line-height: 1.5;
+            white-space: pre;
+            overflow-x: auto;
+        }
+
+        .button-group { display: flex; gap: 8px; }
+        button {
+            background: #30363d;
+            color: white;
+            border: none;
+            padding: 6px 14px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 0.75rem;
+            transition: background 0.2s;
+        }
+        
+        button.playing-state { background: #8957e5 !important; }
+        button.playing-state:hover { background: #a371f7 !important; }
+        button.paused-state { background: #238636 !important; }
+        button.paused-state:hover { background: #2ea043 !important; }
+        
+        button.save { background: #1f6feb; }
+        button.open { background: #6e7681; }
+        button.secondary { background: #30363d; }
+        button#runBtn { background: #238636; }
+
+        #terminal-wrapper {
+            width: 350px;
+            display: flex;
+            flex-direction: column;
+            background: #010409;
+            padding: 10px;
+        }
+
+        #terminal { flex-grow: 1; overflow-y: auto; font-size: 0.8rem; }
+        .log-entry { display: flex; margin-bottom: 4px; padding-left: 8px; font-family: monospace; border-left: 3px solid transparent; }
+        .time { color: #484f58; margin-right: 10px; font-size: 0.7rem; }
+        .error { color: #ff7b72; border-left-color: #ff7b72; }
+        .update { color: #7ee787; }
+    </style>
+</head>
+<body>
+
+    <div id="canvas-container">
+        <canvas id="shaderCanvas" width="720" height="360"></canvas>
+        <div class="canvas-controls">
+            <button id="pausePlayBtn" class="playing-state" onclick="togglePause()">Pause (Alt+S)</button>
+        </div>
+    </div>
+
+    <div id="editor-wrapper">
+        <div class="section-header">
+            <span id="version-label">Hybrid Shader Studio</span>
+            <div class="button-group">
+                <button class="open" title="Alt + J" onclick="openFile()">Open File (Alt+J)</button>
+                <button class="save" onclick="downloadTxt()">download.txt</button>
+                <button class="secondary" title="Alt + L" onclick="exportFullHtml()">Save As (Alt+L)</button>
+                <button id="runBtn" onclick="compileShaderFromEditor()">Run (Alt+Enter)</button>
+            </div>
+        </div>
+        <div class="editor-container">
+            <div id="line-numbers"></div>
+            <textarea id="shaderEditor" spellcheck="false" oninput="updateLineNumbers()" onscroll="syncScroll()">#version 300 es
+precision mediump float;
+uniform float u_time;
+uniform vec2 u_resolution;
+out vec4 outColor;
+
+void main() {
+    vec2 uv = gl_FragCoord.xy / u_resolution.xy; 
+    vec3 color = 0.5 + 0.5 * cos(u_time + uv.xyx + vec3(0, 2, 4));
+    outColor = vec4(color, 1.0);
+}</textarea>
+        </div>
+    </div>
+
+    <div id="terminal-wrapper">
+        <div class="section-header">System Output</div>
+        <div id="terminal"></div>
+    </div>
+
+    <script id="vertexShader" type="x-shader/x-vertex">#version 300 es
+in vec2 position;
+void main() { gl_Position = vec4(position, 0.0, 1.0); }</script>
+
+    <script>
+        const canvas = document.getElementById('shaderCanvas');
+        const editor = document.getElementById('shaderEditor');
+        const terminal = document.getElementById('terminal');
+        const lineNumbers = document.getElementById('line-numbers');
+        const pausePlayBtn = document.getElementById('pausePlayBtn');
+        
+        let gl = canvas.getContext('webgl2');
+        let program, animationId;
+        let isPaused = false;
+        let startTime = performance.now();
+        let pausedAt = 0;
+        let totalPausedTime = 0;
+
+        const registry = new Map();
+
+        function syncScroll() { lineNumbers.scrollTop = editor.scrollTop; }
+
+        function updateLineNumbers() {
+            const lines = editor.value.split('\n');
+            lineNumbers.innerHTML = lines.map((_, i) => i + 1).join('<br>');
+        }
+
+        const nativeConsole = { log: console.log, error: console.error };
+
+        function renderToUI(key, message, level = 'log') {
+            if (key && registry.has(key)) {
+                const existing = registry.get(key);
+                const contentSpan = existing.querySelector('.content');
+                if (contentSpan) contentSpan.textContent = message;
+            } else {
+                const entry = document.createElement('div');
+                entry.className = `log-entry ${level}`;
+                entry.innerHTML = `<span class="time">[${performance.now().toFixed(0)}ms]</span><span class="content">${message}</span>`;
+                terminal.appendChild(entry);
+                if (key) registry.set(key, entry);
+            }
+            terminal.scrollTop = terminal.scrollHeight;
+        }
+
+        console.log = (...args) => { 
+            nativeConsole.log(...args); 
+            renderToUI(null, args.join(' '), 'log'); 
+        };
+        console.error = (...args) => { 
+            nativeConsole.error(...args); 
+            renderToUI(null, args.join(' '), 'error'); 
+        };
+        console.update = (id, msg) => renderToUI(id, msg, 'update');
+
+        async function downloadTxt() {
+            if ('showSaveFilePicker' in window) {
+                try {
+                    const handle = await window.showSaveFilePicker({
+                        suggestedName: 'shader.txt',
+                        types: [{ description: 'Text File', accept: { 'text/plain': ['.txt'] } }]
+                    });
+                    const writable = await handle.createWritable();
+                    await writable.write(editor.value);
+                    await writable.close();
+                } catch (err) { if (err.name !== 'AbortError') console.error(err.message); }
+            }
+        }
+
+        async function exportFullHtml() {
+            editor.textContent = editor.value; 
+            const content = "<!DOCTYPE html>\n" + document.documentElement.outerHTML;
+            if ('showSaveFilePicker' in window) {
+                try {
+                    const handle = await window.showSaveFilePicker({
+                        suggestedName: 'ShaderStudio_Project.html',
+                        types: [{ description: 'HTML Webpage', accept: { 'text/html': ['.html'] } }]
+                    });
+                    const writable = await handle.createWritable();
+                    await writable.write(content);
+                    await writable.close();
+                } catch (err) { if (err.name !== 'AbortError') console.error(err.message); }
+            }
+        }
+
+        async function openFile() {
+            if ('showOpenFilePicker' in window) {
+                try {
+                    const [handle] = await window.showOpenFilePicker({
+                        types: [{ description: 'Files', accept: { 'text/plain': ['.txt', '.glsl'], 'text/html': ['.html'] } }]
+                    });
+                    const file = await handle.getFile();
+                    const text = await file.text();
+                    if (file.name.endsWith('.html')) {
+                        const parser = new DOMParser();
+                        const doc = parser.parseFromString(text, 'text/html');
+                        const savedEditor = doc.getElementById('shaderEditor');
+                        if (savedEditor) editor.value = savedEditor.value || savedEditor.textContent;
+                    } else { editor.value = text; }
+                    updateLineNumbers();
+                    compileShaderFromEditor();
+                } catch (err) { if (err.name !== 'AbortError') console.error(err.message); }
+            }
+        }
+
+        function togglePause() {
+            isPaused = !isPaused;
+            pausePlayBtn.classList.remove('playing-state', 'paused-state');
+            if (isPaused) {
+                pausedAt = performance.now();
+                pausePlayBtn.textContent = "Play (Alt+S)";
+                pausePlayBtn.classList.add('paused-state');
+            } else {
+                totalPausedTime += (performance.now() - pausedAt);
+                pausePlayBtn.textContent = "Pause (Alt+S)";
+                pausePlayBtn.classList.add('playing-state');
+                requestAnimationFrame(renderLoop);
+            }
+        }
+
+        function createShader(gl, type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                console.error(gl.getShaderInfoLog(shader));
+                return null;
+            }
+            return shader;
+        }
+
+        function compileShaderFromEditor() {
+            if (animationId) cancelAnimationFrame(animationId);
+            const vsSource = document.getElementById('vertexShader').textContent.trim();
+            const vs = createShader(gl, gl.VERTEX_SHADER, vsSource);
+            const fs = createShader(gl, gl.FRAGMENT_SHADER, editor.value.trim());
+            
+            if (!vs || !fs) return;
+
+            program = gl.createProgram();
+            gl.attachShader(program, vs);
+            gl.attachShader(program, fs);
+            gl.linkProgram(program);
+
+            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                console.error(gl.getProgramInfoLog(program));
+                return;
+            }
+
+            gl.useProgram(program);
+            startTime = performance.now();
+            totalPausedTime = 0;
+            isPaused = false;
+            pausePlayBtn.textContent = "Pause (Alt+S)";
+            pausePlayBtn.classList.remove('paused-state');
+            pausePlayBtn.classList.add('playing-state');
+            
+            const buffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW);
+            
+            const pos = gl.getAttribLocation(program, "position");
+            gl.enableVertexAttribArray(pos);
+            gl.vertexAttribPointer(pos, 2, gl.FLOAT, false, 0, 0);
+
+            console.update('status', "Shader Compiled Successfully");
+            requestAnimationFrame(renderLoop);
+        }
+
+        function renderLoop(now) {
+            if (isPaused) return;
+            const time = (now - startTime - totalPausedTime) * 0.001;
+            gl.viewport(0, 0, canvas.width, canvas.height);
+            
+            const uTime = gl.getUniformLocation(program, "u_time");
+            const uRes = gl.getUniformLocation(program, "u_resolution");
+            
+            if(uTime) gl.uniform1f(uTime, time);
+            if(uRes) gl.uniform2f(uRes, canvas.width, canvas.height);
+            
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
+            console.update('gpu-stats', `Time: ${time.toFixed(2)}s`);
+            animationId = requestAnimationFrame(renderLoop);
+        }
+
+        window.addEventListener('keydown', e => {
+            if (e.altKey && e.key === 'Enter') compileShaderFromEditor();
+            if (e.altKey && e.key.toLowerCase() === 's') { e.preventDefault(); togglePause(); }
+            if (e.altKey && e.key.toLowerCase() === 'j') { e.preventDefault(); openFile(); }
+            if (e.altKey && e.key.toLowerCase() === 'l') { e.preventDefault(); exportFullHtml(); }
+        });
+
+        updateLineNumbers();
+        if (gl) compileShaderFromEditor();
+    </script>
+</body>
+</html>
